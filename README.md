@@ -14,8 +14,8 @@ uv sync
 
 ## Commands
 
-basic: `uv run python src/train.py --n-ncas 3 --epochs 1000 --device cpu`
-wandb logging: `uv run python src/train.py --n-ncas 3 --epochs 10000 --device cuda --wandb`
+- basic: `uv run python src/train.py --n-ncas 3 --epochs 1000 --device cpu`
+- wandb logging: `uv run python src/train.py --n-ncas 3 --epochs 10000 --device cuda --wandb`
 
 ## Configs
 
