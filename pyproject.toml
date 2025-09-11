@@ -1,5 +1,5 @@
 [project]
-name = "Petri Dish NCA"
+name = "petri-dish-nca"
 version = "1.0.0"
 description = "Sakana AI's project for a multi-agent NCA substrate"
 readme = "README.md"
