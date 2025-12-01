@@ -53,6 +53,7 @@ class Config:
     epochs: int = 1_000
     log_every: int = 100
     wandb: bool = False
+    live_viz: bool = False
 
     # Sun
     sun_update_epoch_wait: int = 0
