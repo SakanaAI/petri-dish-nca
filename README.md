@@ -22,7 +22,7 @@ uv sync
 - 3D grid size via CLI: `uv run python src/train.py --n-ncas 3 --epochs 200 --grid-size 10 10 10`
 - 3D view with grid override: `uv run python src/visualize_trained.py --model-path <run_dir> --grid-size 10 10 10`
 - 3D plotly view with mouse controls + playback: `uv run python src/visualize_trained.py --model-path <run_dir> --plotly`
-- Plotly playback speed + loop: `uv run python src/visualize_trained.py --model-path <run_dir> --plotly --plotly-speed 0.5 --plotly-loop`
+- Plotly playback speed: `uv run python src/visualize_trained.py --model-path <run_dir> --plotly --plotly-speed 0.5`
 
 3D visualization options (viz-only) include:
 `--viz-slice-axis`, `--viz-slice-stride`, `--viz-slice-spacing`, `--viz-slice-alpha`, `--viz-max-slices`

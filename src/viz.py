@@ -50,6 +50,33 @@ def _get_slice_indices(
     return indices
 
 
+def _compute_slice_axis_ticks(
+    slice_indices: list[int],
+    spacing: float,
+    slice_count: int,
+) -> tuple[list[float], list[str]]:
+    if not slice_indices or slice_count <= 0:
+        return [], []
+
+    spacing_int = int(round(spacing))
+    indices_set = set(slice_indices)
+    if spacing_int > 0 and math.isclose(spacing, spacing_int, rel_tol=1e-6, abs_tol=1e-6):
+        axis_max = (slice_count - 1) * spacing_int
+        tick_vals = list(range(0, int(axis_max) + 1))
+        tick_labels: list[str] = []
+        for value in tick_vals:
+            if value % spacing_int == 0:
+                idx = value // spacing_int
+                tick_labels.append(str(idx) if idx in indices_set else "")
+            else:
+                tick_labels.append("")
+        return [float(value) for value in tick_vals], tick_labels
+
+    tick_vals = [idx * spacing for idx in slice_indices]
+    tick_labels = [str(idx) for idx in slice_indices]
+    return tick_vals, tick_labels
+
+
 def _compute_territory_winners(
     grid: torch.Tensor, n_ncas: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -57,6 +84,50 @@ def _compute_territory_winners(
     winners = torch.argmax(aliveness, dim=0)
     control_strength = torch.max(aliveness, dim=0)[0]
     return winners, control_strength
+
+
+def compute_population_percent(grid: torch.Tensor, n_ncas: int) -> list[float]:
+    """Compute occupied percent for each NCA based on territory winners."""
+    if grid.dim() == 5:
+        grid = grid[0]
+    grid = _ensure_3d_grid(grid).detach().cpu()
+    winners, _ = _compute_territory_winners(grid, n_ncas)
+    counts = torch.bincount(winners.flatten(), minlength=n_ncas + 1).float()
+    total = counts.sum().clamp(min=1.0)
+    percents = (counts / total * 100.0).tolist()
+    return percents[1:]
+
+
+def _plotly_population_traces(
+    population_history: list[list[float]],
+    nca_colors: colors,
+    showlegend: bool,
+):
+    import plotly.graph_objects as go
+
+    if not population_history:
+        return []
+
+    history = np.array(population_history, dtype=float)
+    if history.ndim == 1:
+        history = history.reshape(1, -1)
+    steps = list(range(history.shape[0]))
+    traces = []
+    for idx, color in enumerate(nca_colors):
+        if idx >= history.shape[1]:
+            break
+        rgb = f"rgb({int(color[0]*255)}, {int(color[1]*255)}, {int(color[2]*255)})"
+        traces.append(
+            go.Scatter(
+                x=steps,
+                y=history[:, idx],
+                mode="lines",
+                name=f"NCA {idx}",
+                line=dict(color=rgb, width=2),
+                showlegend=showlegend,
+            )
+        )
+    return traces
 
 
 def create_territory_volume(
@@ -246,6 +317,19 @@ def plot_slice_stack_matplotlib(
         [max(1.0, x_max + 1), max(1.0, y_max + 1), max(1.0, z_max + 1)]
     )
 
+    slice_count = depth if axis == "depth" else height if axis == "height" else width
+    tick_vals, tick_labels = _compute_slice_axis_ticks(indices, spacing, slice_count)
+    if tick_vals:
+        if axis == "depth":
+            ax.set_zticks(tick_vals)
+            ax.set_zticklabels(tick_labels)
+        elif axis == "height":
+            ax.set_yticks(tick_vals)
+            ax.set_yticklabels(tick_labels)
+        else:
+            ax.set_xticks(tick_vals)
+            ax.set_xticklabels(tick_labels)
+
 
 def build_plotly_slice_stack(
     grid: torch.Tensor,
@@ -255,6 +339,7 @@ def build_plotly_slice_stack(
     spacing: float = 1.2,
     max_slices: int | None = None,
     alpha: float = 0.9,
+    population_history: list[list[float]] | None = None,
 ):
     """Build a Plotly figure with slice surfaces for interactive viewing."""
     import plotly.graph_objects as go
@@ -263,7 +348,7 @@ def build_plotly_slice_stack(
     winners, _ = _compute_territory_winners(grid, len(nca_colors))
     winners_np = winners.numpy()
 
-    surfaces, extents = _plotly_slice_surfaces(
+    surfaces, extents, slice_ticks, slice_indices = _plotly_slice_surfaces(
         winners_np,
         nca_colors,
         axis=axis,
@@ -273,8 +358,39 @@ def build_plotly_slice_stack(
         alpha=alpha,
     )
 
-    fig = go.Figure(data=surfaces)
-    _plotly_apply_layout(fig, extents)
+    if population_history:
+        from plotly.subplots import make_subplots
+
+        fig = make_subplots(
+            rows=2,
+            cols=1,
+            specs=[[{"type": "scene"}], [{"type": "xy"}]],
+            row_heights=[0.8, 0.2],
+            vertical_spacing=0.02,
+        )
+        for surface in surfaces:
+            fig.add_trace(surface, row=1, col=1)
+        pop_traces = _plotly_population_traces(
+            population_history, nca_colors, showlegend=True
+        )
+        for trace in pop_traces:
+            fig.add_trace(trace, row=2, col=1)
+        fig.update_xaxes(
+            title_text=None,
+            title_standoff=0,
+            row=2,
+            col=1,
+            range=[0, max(0, len(population_history) - 1)],
+        )
+        y_max = float(np.max(population_history)) if population_history else 100.0
+        if y_max <= 0:
+            y_max = 1.0
+        y_max *= 1.02
+        fig.update_yaxes(title_text="Occupied %", row=2, col=1, range=[0, y_max])
+    else:
+        fig = go.Figure(data=surfaces)
+    _plotly_apply_layout(fig, extents, slice_axis=axis, slice_ticks=slice_ticks)
+    _plotly_apply_slice_slider(fig, slice_indices)
     return fig
 
 
@@ -287,7 +403,7 @@ def build_plotly_slice_stack_animation(
     max_slices: int | None = None,
     alpha: float = 0.9,
     frame_duration_ms: int = 160,
-    loop: bool = True,
+    population_history: list[list[float]] | None = None,
 ):
     """Build a Plotly figure with animated slice stacks."""
     import plotly.graph_objects as go
@@ -295,28 +411,88 @@ def build_plotly_slice_stack_animation(
     grid_sequence = _normalize_grid_sequence(grids)
     frames = []
     extents = None
+    slice_ticks = None
+    slice_indices: list[int] | None = None
+    has_populations = bool(population_history)
 
     for idx, grid in enumerate(grid_sequence):
         grid = _ensure_3d_grid(grid).detach().cpu()
         winners, _ = _compute_territory_winners(grid, len(nca_colors))
         winners_np = winners.numpy()
-        surfaces, extents = _plotly_slice_surfaces(
+        surfaces, extents, slice_ticks, frame_indices = _plotly_slice_surfaces(
             winners_np,
             nca_colors,
             axis=axis,
             stride=stride,
             spacing=spacing,
             max_slices=max_slices,
-            alpha=alpha,
+            alpha=None,
         )
-        frames.append(go.Frame(data=surfaces, name=str(idx)))
+        if slice_indices is None:
+            slice_indices = frame_indices
+        if has_populations and population_history:
+            frame_traces = surfaces + _plotly_population_traces(
+                population_history[: idx + 1],
+                nca_colors,
+                showlegend=False,
+            )
+        else:
+            frame_traces = surfaces
+        frames.append(go.Frame(data=frame_traces, name=str(idx)))
 
     if not frames:
         return go.Figure()
 
-    fig = go.Figure(data=frames[0].data, frames=frames)
-    _plotly_apply_layout(fig, extents)
-    _plotly_apply_animation_controls(fig, frame_duration_ms, loop)
+    base_grid = _ensure_3d_grid(grid_sequence[0]).detach().cpu()
+    winners, _ = _compute_territory_winners(base_grid, len(nca_colors))
+    winners_np = winners.numpy()
+    base_surfaces, extents, slice_ticks, slice_indices = _plotly_slice_surfaces(
+        winners_np,
+        nca_colors,
+        axis=axis,
+        stride=stride,
+        spacing=spacing,
+        max_slices=max_slices,
+        alpha=alpha,
+    )
+
+    if has_populations and population_history:
+        from plotly.subplots import make_subplots
+
+        fig = make_subplots(
+            rows=2,
+            cols=1,
+            specs=[[{"type": "scene"}], [{"type": "xy"}]],
+            row_heights=[0.8, 0.2],
+            vertical_spacing=0.02,
+        )
+        for surface in base_surfaces:
+            fig.add_trace(surface, row=1, col=1)
+        base_pop_traces = _plotly_population_traces(
+            population_history[:1], nca_colors, showlegend=True
+        )
+        for trace in base_pop_traces:
+            fig.add_trace(trace, row=2, col=1)
+        fig.update_xaxes(
+            title_text=None,
+            title_standoff=0,
+            row=2,
+            col=1,
+            range=[0, max(0, len(population_history) - 1)],
+        )
+        y_max = float(np.max(population_history)) if population_history else 100.0
+        if y_max <= 0:
+            y_max = 1.0
+        y_max *= 1.02
+        fig.update_yaxes(title_text="Occupied %", row=2, col=1, range=[0, y_max])
+        fig.frames = frames
+    else:
+        fig = go.Figure(data=base_surfaces, frames=frames)
+
+    _plotly_apply_layout(fig, extents, slice_axis=axis, slice_ticks=slice_ticks)
+    _plotly_apply_animation_controls(fig, frame_duration_ms)
+    if slice_indices is not None:
+        _plotly_apply_slice_slider(fig, slice_indices)
     return fig
 
 
@@ -354,13 +530,14 @@ def _plotly_slice_surfaces(
     stride: int,
     spacing: float,
     max_slices: int | None,
-    alpha: float,
+    alpha: float | None,
 ):
     import plotly.graph_objects as go
 
     depth, height, width = winners_np.shape
     slice_count = depth if axis == "depth" else height if axis == "height" else width
     indices = _get_slice_indices(slice_count, stride=stride, max_slices=max_slices)
+    slice_ticks = _compute_slice_axis_ticks(indices, spacing, slice_count)
 
     colorscale = _plotly_colorscale(nca_colors)
     surfaces = []
@@ -387,44 +564,67 @@ def _plotly_slice_surfaces(
             Y, Z = np.meshgrid(y, z)
             X = np.full_like(Y, idx * spacing, dtype=float)
 
-        surfaces.append(
-            go.Surface(
-                x=X,
-                y=Y,
-                z=Z,
-                surfacecolor=slice_vals,
-                cmin=0,
-                cmax=len(nca_colors),
-                colorscale=colorscale,
-                showscale=False,
-                opacity=alpha,
-            )
+        surface_kwargs = dict(
+            x=X,
+            y=Y,
+            z=Z,
+            surfacecolor=slice_vals,
+            cmin=0,
+            cmax=len(nca_colors),
+            colorscale=colorscale,
+            showscale=False,
         )
+        if alpha is not None:
+            surface_kwargs["opacity"] = alpha
+        surfaces.append(go.Surface(**surface_kwargs))
 
     x_max = (width - 1) * spacing if axis == "width" else width - 1
     y_max = (height - 1) * spacing if axis == "height" else height - 1
     z_max = (depth - 1) * spacing if axis == "depth" else depth - 1
 
-    return surfaces, (x_max, y_max, z_max)
+    return surfaces, (x_max, y_max, z_max), slice_ticks, indices
 
 
-def _plotly_apply_layout(fig, extents: tuple[float, float, float] | None) -> None:
+def _plotly_apply_layout(
+    fig,
+    extents: tuple[float, float, float] | None,
+    slice_axis: str | None = None,
+    slice_ticks: tuple[list[float], list[str]] | None = None,
+) -> None:
     if extents is None:
         extents = (0, 0, 0)
     x_max, y_max, z_max = extents
-    fig.update_layout(
-        scene=dict(
-            xaxis=dict(title="width", range=[0, max(0, x_max)]),
-            yaxis=dict(title="height", range=[0, max(0, y_max)]),
-            zaxis=dict(title="depth", range=[0, max(0, z_max)]),
-            aspectmode="data",
+    x_extent = max(0.0, x_max) + 1.0
+    y_extent = max(0.0, y_max) + 1.0
+    z_extent = max(0.0, z_max) + 1.0
+    max_extent = max(x_extent, y_extent, z_extent, 1.0)
+    scene = dict(
+        xaxis=dict(title="width", range=[0, max(0, x_max)], autorange=False),
+        yaxis=dict(title="height", range=[0, max(0, y_max)], autorange=False),
+        zaxis=dict(title="depth", range=[0, max(0, z_max)], autorange=False),
+        aspectmode="manual",
+        aspectratio=dict(
+            x=x_extent / max_extent,
+            y=y_extent / max_extent,
+            z=z_extent / max_extent,
         ),
+        uirevision="slice-view",
+        camera=dict(eye=dict(x=1.9, y=1.9, z=1.4)),
+    )
+    if slice_axis and slice_ticks and slice_ticks[0]:
+        axis_key = {"width": "xaxis", "height": "yaxis", "depth": "zaxis"}[slice_axis]
+        scene[axis_key].update(
+            dict(tickmode="array", tickvals=slice_ticks[0], ticktext=slice_ticks[1])
+        )
+    fig.update_layout(
+        scene=scene,
         margin=dict(l=0, r=0, t=0, b=0),
+        uirevision="slice-view",
     )
 
 
-def _plotly_apply_animation_controls(fig, frame_duration_ms: int, loop: bool) -> None:
-    loop_mode = "loop" if loop else "immediate"
+def _plotly_apply_animation_controls(fig, frame_duration_ms: int) -> None:
+    loop_mode = "immediate"
     speed_options = [0.25, 0.5, 1.0, 2.0]
     speed_buttons = [
         dict(
@@ -441,34 +641,6 @@ def _plotly_apply_animation_controls(fig, frame_duration_ms: int, loop: bool) ->
             ],
         )
         for speed in speed_options
-    ]
-    loop_buttons = [
-        dict(
-            label="Loop On",
-            method="animate",
-            args=[
-                None,
-                {
-                    "frame": {"duration": frame_duration_ms, "redraw": True},
-                    "fromcurrent": True,
-                    "transition": {"duration": 0},
-                    "mode": "loop",
-                },
-            ],
-        ),
-        dict(
-            label="Loop Off",
-            method="animate",
-            args=[
-                None,
-                {
-                    "frame": {"duration": frame_duration_ms, "redraw": True},
-                    "fromcurrent": True,
-                    "transition": {"duration": 0},
-                    "mode": "immediate",
-                },
-            ],
-        ),
     ]
     fig.update_layout(
         updatemenus=[
@@ -502,8 +674,7 @@ def _plotly_apply_animation_controls(fig, frame_duration_ms: int, loop: bool) ->
                         ],
                     ),
                 ],
-            )
-            ,
+            ),
             dict(
                 type="buttons",
                 showactive=True,
@@ -512,24 +683,78 @@ def _plotly_apply_animation_controls(fig, frame_duration_ms: int, loop: bool) ->
                 direction="right",
                 buttons=speed_buttons,
             ),
-            dict(
-                type="buttons",
-                showactive=True,
-                x=0.0,
-                y=1.2,
-                direction="right",
-                buttons=loop_buttons,
-            ),
         ],
         sliders=[
             dict(
                 active=0,
+                y=-0.015,
+                yanchor="top",
+                x=0.1,
+                len=0.9,
+                currentvalue=dict(prefix="Step: "),
                 steps=[
-                    dict(method="animate", label=frame.name, args=[[frame.name]])
+                    dict(
+                        method="animate",
+                        label=frame.name,
+                        args=[
+                            [frame.name],
+                            {
+                                "mode": "immediate",
+                                "frame": {"duration": 0, "redraw": True},
+                                "transition": {"duration": 0},
+                            },
+                        ],
+                    )
                     for frame in fig.frames
                 ],
             )
         ],
+        margin=dict(l=0, r=0, t=0, b=90),
+    )
+
+
+def _plotly_apply_slice_slider(fig, slice_indices: list[int]) -> None:
+    if len(slice_indices) <= 1:
+        return
+
+    steps = []
+    n_traces = len(slice_indices)
+    total_traces = len(fig.data)
+    base_opacities = []
+    for trace in fig.data:
+        opacity = getattr(trace, "opacity", None)
+        base_opacities.append(1.0 if opacity is None else opacity)
+    for idx in range(min(n_traces, total_traces)):
+        fig.data[idx].visible = True
+    initial_slice = slice_indices[-1]
+    for step_idx, slice_idx in reversed(list(enumerate(slice_indices))):
+        opacities = list(base_opacities)
+        for idx in range(step_idx + 1, n_traces):
+            if idx < total_traces:
+                opacities[idx] = 0.0
+        steps.append(
+            dict(
+                method="restyle",
+                label=str(slice_idx),
+                args=["opacity", opacities],
+            )
+        )
+
+    slider = dict(
+        active=0,
+        y=-0.13,
+        yanchor="top",
+        x=0.1,
+        len=0.9,
+        currentvalue=dict(prefix="Slice end: "),
+        steps=steps,
+    )
+
+    existing = list(getattr(fig.layout, "sliders", []) or [])
+    existing.append(slider)
+    fig.update_layout(
+        sliders=existing,
+        margin=dict(l=0, r=0, t=0, b=90),
     )
 
 

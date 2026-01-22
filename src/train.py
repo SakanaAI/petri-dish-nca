@@ -44,6 +44,11 @@ def parse_args() -> argparse.Namespace:
         nargs="+",
         help="Grid size as D H W (or H W for 2D)",
     )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        help="Batch size (<= pool_size)",
+    )
     parser.add_argument("--wandb", action="store_true", help="Enable wandb logging")
     parser.add_argument(
         "--live-viz",
@@ -111,6 +116,9 @@ def load_config(args: argparse.Namespace) -> Config:
     if args.epochs:
         config.epochs = args.epochs
         print(f"[config] updated epochs to {config.epochs}")
+    if args.batch_size is not None:
+        config.batch_size = args.batch_size
+        print(f"[config] updated batch_size to {config.batch_size}")
     if args.device:
         config.device = args.device
         print(f"[config] updated device to {config.device}")

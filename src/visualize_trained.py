@@ -16,6 +16,7 @@ from model import CASunGroup
 from viz import (
     build_plotly_slice_stack_animation,
     build_plotly_slice_stack,
+    compute_population_percent,
     capture_snapshot,
     create_territory_volume,
     generate_nca_colors,
@@ -52,6 +53,11 @@ def parse_args() -> argparse.Namespace:
         help="Override grid size as D H W (or H W for 2D)",
     )
     parser.add_argument(
+        "--batch-size",
+        type=int,
+        help="Override batch size for visualization",
+    )
+    parser.add_argument(
         "--slice-axis", choices=["depth", "height", "width"],
         help="Axis to slice for 3D visualization (viz-only)"
     )
@@ -60,8 +66,11 @@ def parse_args() -> argparse.Namespace:
         help="Stride between slices for 3D visualization (viz-only)"
     )
     parser.add_argument(
-        "--slice-spacing", type=float,
-        help="Spacing between slices (viz-only)"
+        "--slice-spacing",
+        "--viz-slice-spacing",
+        dest="slice_spacing",
+        type=float,
+        help="Spacing between slices (viz-only)",
     )
     parser.add_argument(
         "--slice-alpha", type=float,
@@ -82,18 +91,6 @@ def parse_args() -> argparse.Namespace:
         help="Plotly playback speed multiplier (1.0 = default speed)",
     )
     parser.add_argument(
-        "--plotly-loop",
-        action="store_true",
-        default=True,
-        help="Loop plotly playback",
-    )
-    parser.add_argument(
-        "--no-plotly-loop",
-        action="store_false",
-        dest="plotly_loop",
-        help="Disable plotly playback looping",
-    )
-    parser.add_argument(
         "--no-plotly", action="store_true",
         help="Disable final Plotly view even for 3D grids"
     )
@@ -105,6 +102,7 @@ def load_trained_model(
     model_path: str,
     device: str,
     grid_size: tuple[int, int] | tuple[int, int, int] | None = None,
+    batch_size: int | None = None,
 ) -> tuple[Config, CASunGroup, World]:
     """Load trained model from directory."""
     # Load config
@@ -113,6 +111,9 @@ def load_trained_model(
     config.device = device
     if grid_size is not None:
         config.grid_size = grid_size
+    if batch_size is not None:
+        config.batch_size = batch_size
+    if grid_size is not None or batch_size is not None:
         config.__post_init__()
 
     # Create models
@@ -138,7 +139,6 @@ def run_visualization(
     max_slices: int | None,
     show_plotly: bool,
     plotly_speed: float,
-    plotly_loop: bool,
 ) -> None:
     """Run live visualization of trained NCA behavior."""
     print(f"Starting visualization: {config.n_ncas} NCAs, {config.grid_size} grid")
@@ -156,8 +156,12 @@ def run_visualization(
 
     grid = world.get_seed()
     plotly_grids: list[torch.Tensor] = []
+    plotly_populations: list[list[float]] = []
     if show_plotly and use_3d_viz:
         plotly_grids.append(grid[0].detach().cpu())
+        plotly_populations.append(
+            compute_population_percent(grid[0], config.n_ncas)
+        )
 
     try:
         for step in range(steps):
@@ -197,6 +201,9 @@ def run_visualization(
 
                 if show_plotly and use_3d_viz:
                     plotly_grids.append(grid[0].detach().cpu())
+                    plotly_populations.append(
+                        compute_population_percent(grid[0], config.n_ncas)
+                    )
 
                 growth_stats = [f"{g:.2f}" for g in stats["growth"]]
                 growth_str = ", ".join(growth_stats)
@@ -221,7 +228,7 @@ def run_visualization(
             max_slices=max_slices,
             alpha=slice_alpha,
             frame_duration_ms=frame_duration_ms,
-            loop=plotly_loop,
+            population_history=plotly_populations,
         )
         fig.show()
 
@@ -249,7 +256,7 @@ def main() -> None:
                 raise ValueError("[config] --grid-size expects 2 or 3 integers")
 
         config, group, world = load_trained_model(
-            args.model_path, args.device, grid_size
+            args.model_path, args.device, grid_size, args.batch_size
         )
     except Exception as e:
         print(f"Error loading model: {e}")
@@ -275,7 +282,6 @@ def main() -> None:
         max_slices,
         use_plotly,
         args.plotly_speed,
-        args.plotly_loop,
     )
 
 
