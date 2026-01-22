@@ -1,5 +1,6 @@
 {
     "grid_size": [
+        1,
         50,
         50
     ],
@@ -26,6 +27,11 @@
     "epochs": 1000,
     "log_every": 10,
     "wandb": false,
+    "viz_slice_axis": "depth",
+    "viz_slice_stride": 1,
+    "viz_slice_spacing": 1.2,
+    "viz_slice_alpha": 0.9,
+    "viz_max_slices": null,
     "sun_update_epoch_wait": 0,
     "steps_before_update": 0,
     "steps_per_update": 1,
