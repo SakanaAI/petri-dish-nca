@@ -12,9 +12,11 @@ from model import CASunGroup
 from viz import (
     capture_snapshot,
     colors,
+    create_territory_volume,
     generate_nca_colors,
     get_shannon_entropy,
-    get_compression_ratios
+    get_compression_ratios,
+    plot_slice_stack_matplotlib,
 )
 
 
@@ -27,15 +29,52 @@ def parse_args() -> argparse.Namespace:
     Returns:
         Parsed arguments namespace containing config path and overrides.
     """
-    parser = argparse.ArgumentParser(description="Train adversarial NCAs")
+    parser = argparse.ArgumentParser(
+        description="Train adversarial NCAs (2D or 3D grids)"
+    )
     parser.add_argument("--config", help="Config file path")
     parser.add_argument("--n-ncas", type=int, help="Number of NCAs")
     parser.add_argument("--epochs", type=int, help="Number of epochs")
     parser.add_argument(
         "--device", choices=["cpu", "cuda", "mps"], help="Device to use"
     )
+    parser.add_argument(
+        "--grid-size",
+        type=int,
+        nargs="+",
+        help="Grid size as D H W (or H W for 2D)",
+    )
     parser.add_argument("--wandb", action="store_true", help="Enable wandb logging")
-    parser.add_argument("--live-viz", action="store_true", help="Enable live matplotlib visualization during training")
+    parser.add_argument(
+        "--live-viz",
+        action="store_true",
+        help="Enable live matplotlib visualization during training (slice stacks for 3D)",
+    )
+    parser.add_argument(
+        "--viz-slice-axis",
+        choices=["depth", "height", "width"],
+        help="Axis to slice for 3D visualization (viz-only)",
+    )
+    parser.add_argument(
+        "--viz-slice-stride",
+        type=int,
+        help="Stride between slices for 3D visualization (viz-only)",
+    )
+    parser.add_argument(
+        "--viz-slice-spacing",
+        type=float,
+        help="Spacing between slices (viz-only)",
+    )
+    parser.add_argument(
+        "--viz-slice-alpha",
+        type=float,
+        help="Slice opacity (viz-only)",
+    )
+    parser.add_argument(
+        "--viz-max-slices",
+        type=int,
+        help="Maximum number of slices to draw (viz-only)",
+    )
 
     return parser.parse_args()
 
@@ -61,6 +100,14 @@ def load_config(args: argparse.Namespace) -> Config:
     if args.n_ncas:
         config.n_ncas = args.n_ncas
         print(f"[config] updated n_ncas to {config.n_ncas}")
+    if args.grid_size:
+        if len(args.grid_size) == 2:
+            config.grid_size = (args.grid_size[0], args.grid_size[1])
+        elif len(args.grid_size) == 3:
+            config.grid_size = (args.grid_size[0], args.grid_size[1], args.grid_size[2])
+        else:
+            raise ValueError("[config] --grid-size expects 2 or 3 integers")
+        print(f"[config] updated grid_size to {config.grid_size}")
     if args.epochs:
         config.epochs = args.epochs
         print(f"[config] updated epochs to {config.epochs}")
@@ -73,6 +120,21 @@ def load_config(args: argparse.Namespace) -> Config:
     if args.live_viz:
         config.live_viz = args.live_viz
         print(f"[config] updated live_viz to {config.live_viz}")
+    if args.viz_slice_axis:
+        config.viz_slice_axis = args.viz_slice_axis
+        print(f"[config] updated viz_slice_axis to {config.viz_slice_axis}")
+    if args.viz_slice_stride:
+        config.viz_slice_stride = args.viz_slice_stride
+        print(f"[config] updated viz_slice_stride to {config.viz_slice_stride}")
+    if args.viz_slice_spacing:
+        config.viz_slice_spacing = args.viz_slice_spacing
+        print(f"[config] updated viz_slice_spacing to {config.viz_slice_spacing}")
+    if args.viz_slice_alpha:
+        config.viz_slice_alpha = args.viz_slice_alpha
+        print(f"[config] updated viz_slice_alpha to {config.viz_slice_alpha}")
+    if args.viz_max_slices:
+        config.viz_max_slices = args.viz_max_slices
+        print(f"[config] updated viz_max_slices to {config.viz_max_slices}")
 
     # Validate after modifications
     config.__post_init__()
@@ -207,7 +269,9 @@ def train_loop(config: Config) -> None:
 
         gs = fig.add_gridspec(3, 4, hspace=0.6, wspace=0.6)
 
-        ax_grid = fig.add_subplot(gs[:2, :2])
+        grid_depth = config.grid_size[0]
+        use_3d_viz = grid_depth > 1
+        ax_grid = fig.add_subplot(gs[:2, :2], projection="3d" if use_3d_viz else None)
         im_grid = None
 
         ax_entropy = fig.add_subplot(gs[0, 2])
@@ -241,7 +305,14 @@ def train_loop(config: Config) -> None:
             # Capture initial frame if logging
             frames = []
             if should_log(epoch, config):
-                frames.append(capture_snapshot(grid, nca_colors))
+                frames.append(
+                    capture_snapshot(
+                        grid,
+                        nca_colors,
+                        slice_stride=config.viz_slice_stride,
+                        max_slices=config.viz_max_slices,
+                    )
+                )
 
             # Training step
             stats, grid, grids = world.step(group, grid)
@@ -253,7 +324,13 @@ def train_loop(config: Config) -> None:
             populations = []
 
             if config.live_viz and epoch % 10 == 0:
-                snapshot = capture_snapshot(grid, nca_colors).permute(1, 2, 0)
+                if not use_3d_viz:
+                    snapshot = capture_snapshot(
+                        grid,
+                        nca_colors,
+                        slice_stride=config.viz_slice_stride,
+                        max_slices=config.viz_max_slices,
+                    ).permute(1, 2, 0)
                 entropy = get_shannon_entropy(grid[0].detach())  
                 compression = get_compression_ratios(grid[0].detach())
 
@@ -271,13 +348,26 @@ def train_loop(config: Config) -> None:
                 loss_history.append(stats["loss"])
                 grad_history.append(stats["grad_norm"].cpu().numpy().mean())
 
-                if im_grid is None:
-                    im_grid = ax_grid.imshow(snapshot)
+                if use_3d_viz:
+                    volume = create_territory_volume(grid[0], nca_colors)
+                    plot_slice_stack_matplotlib(
+                        ax_grid,
+                        volume,
+                        axis=config.viz_slice_axis,
+                        stride=config.viz_slice_stride,
+                        spacing=config.viz_slice_spacing,
+                        max_slices=config.viz_max_slices,
+                        alpha=config.viz_slice_alpha,
+                    )
                     ax_grid.set_title(f"NCA Territories - Epoch: {epoch}")
-                    ax_grid.axis("off")
                 else:
-                    im_grid.set_data(snapshot)
-                    ax_grid.set_title(f"NCA Territories - Epoch: {epoch}")
+                    if im_grid is None:
+                        im_grid = ax_grid.imshow(snapshot)
+                        ax_grid.set_title(f"NCA Territories - Epoch: {epoch}")
+                        ax_grid.axis("off")
+                    else:
+                        im_grid.set_data(snapshot)
+                        ax_grid.set_title(f"NCA Territories - Epoch: {epoch}")
 
                 if line_entropy is None:
                     line_entropy, = ax_entropy.plot(epochs_history, entropy_history, 'b-', label='Shannon Entropy')
@@ -349,7 +439,14 @@ def train_loop(config: Config) -> None:
 
             if should_log(epoch, config):
                 for st in range(grids.shape[0]):
-                    frames.append(capture_snapshot(grids[st], nca_colors))
+                    frames.append(
+                        capture_snapshot(
+                            grids[st],
+                            nca_colors,
+                            slice_stride=config.viz_slice_stride,
+                            max_slices=config.viz_max_slices,
+                        )
+                    )
                 log_metrics(run, epoch, stats, frames, nca_colors, grid)
 
     except KeyboardInterrupt:

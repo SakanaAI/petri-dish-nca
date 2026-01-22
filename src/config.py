@@ -14,8 +14,8 @@ class Config:
     validation, and seed management for reproducible experiments.
     """
 
-    # Grid
-    grid_size: tuple[int, int] = (10, 10)
+    # Grid (D, H, W); 2D configs (H, W) are promoted to (1, H, W)
+    grid_size: tuple[int, int] | tuple[int, int, int] = (10, 10)
     n_seeds: int = 1
 
     # World
@@ -55,6 +55,13 @@ class Config:
     wandb: bool = False
     live_viz: bool = False
 
+    # Visualization (viz-only; does not affect training)
+    viz_slice_axis: Literal["depth", "height", "width"] = "depth"
+    viz_slice_stride: int = 1
+    viz_slice_spacing: float = 1.2
+    viz_slice_alpha: float = 0.9
+    viz_max_slices: int | None = None
+
     # Sun
     sun_update_epoch_wait: int = 0
 
@@ -76,12 +83,23 @@ class Config:
         Raises:
             AssertionError: If cell_state_dim is not even or batch_size > pool_size.
         """
+        if isinstance(self.grid_size, list):
+            object.__setattr__(self, "grid_size", tuple(self.grid_size))
+        if len(self.grid_size) == 2:
+            object.__setattr__(self, "grid_size", (1, *self.grid_size))
+        assert len(self.grid_size) == 3, "[config] grid_size must be (D, H, W)"
+
         assert self.cell_state_dim % 2 == 0, "[config] cell_state_dim must be even"
         assert self.batch_size <= self.pool_size, "[config] batch_size > pool_size"
         assert self.n_seeds * self.n_ncas <= self.total_grid_size, (
             "[config] n_seeds * n_ncas > self.total_grid_size"
         )
         assert self.softmax_temp > 0, "[config] softmax_temp <= 0"
+        assert self.viz_slice_stride > 0, "[config] viz_slice_stride must be > 0"
+        assert self.viz_slice_spacing > 0, "[config] viz_slice_spacing must be > 0"
+        assert 0.0 <= self.viz_slice_alpha <= 1.0, "[config] viz_slice_alpha must be [0, 1]"
+        if self.viz_max_slices is not None:
+            assert self.viz_max_slices > 0, "[config] viz_max_slices must be > 0"
 
         # Device availability check
         if self.device == "cuda" and not torch.cuda.is_available():
@@ -143,9 +161,9 @@ class Config:
         """Total number of cells in the grid.
 
         Returns:
-            Product of grid dimensions (width * height).
+            Product of grid dimensions (depth * height * width).
         """
-        return self.grid_size[0] * self.grid_size[1]
+        return self.grid_size[0] * self.grid_size[1] * self.grid_size[2]
 
     @classmethod
     def from_file(cls, path: str) -> "Config":

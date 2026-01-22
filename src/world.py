@@ -96,7 +96,9 @@ class UpdatePoolWithNondeadFeature(Feature):
 
     def after_step(self, world, grid):
         # If there are any in the batch where a NCA has died out, replace it with something in pool
-        nca_growth = reduce(grid[:, 1 : self.n_ncas + 1], "b c h w -> b c", "sum")
+        nca_growth = reduce(
+            grid[:, 1 : self.n_ncas + 1], "b c d h w -> b c", "sum"
+        )
         alive_mask = torch.all(nca_growth > 0, dim=1)  # [B, ]
 
         # Update pool with anything still valid
@@ -215,10 +217,12 @@ class World:
         )
 
         if config.seed_dist == "scatter":
+            depth, height, width = config.grid_size
             # Generate seeds
             all_coords = torch.cartesian_prod(
-                torch.arange(config.grid_size[0], device=config.device),
-                torch.arange(config.grid_size[1], device=config.device),
+                torch.arange(depth, device=config.device),
+                torch.arange(height, device=config.device),
+                torch.arange(width, device=config.device),
             )
 
             # Generate all seeds for all NCAs at once
@@ -231,8 +235,9 @@ class World:
                 ]
             )
             seed_pts = all_coords[seed_idxs]
-            init_xs = seed_pts[:, :, :, 0]
-            init_ys = seed_pts[:, :, :, 1]
+            init_ds = seed_pts[:, :, :, 0]
+            init_hs = seed_pts[:, :, :, 1]
+            init_ws = seed_pts[:, :, :, 2]
 
         batch_indices = (
             torch.arange(config.pool_size)
@@ -247,8 +252,9 @@ class World:
 
         batch_flat = batch_indices.flatten()
         nca_flat = nca_indices.flatten()
-        xs_flat = init_xs.flatten()
-        ys_flat = init_ys.flatten()
+        ds_flat = init_ds.flatten()
+        hs_flat = init_hs.flatten()
+        ws_flat = init_ws.flatten()
 
         if config.seed_mode == "solid":
             seed_vals = 1.0
@@ -277,9 +283,9 @@ class World:
         # Set so the sun is immediately alive at all places
         self.pool[:, 0] = 1.0
 
-        self.pool[batch_flat, config.alive_dim :, xs_flat, ys_flat] = seed_vals
-        self.pool[batch_flat, 0, xs_flat, ys_flat] = 0.0
-        self.pool[batch_flat, nca_flat + 1, xs_flat, ys_flat] = 1.0
+        self.pool[batch_flat, config.alive_dim :, ds_flat, hs_flat, ws_flat] = seed_vals
+        self.pool[batch_flat, 0, ds_flat, hs_flat, ws_flat] = 0.0
+        self.pool[batch_flat, nca_flat + 1, ds_flat, hs_flat, ws_flat] = 1.0
 
         # Normalize the aliveness
         self.pool[:, : config.alive_dim] /= self.pool[:, : config.alive_dim].sum(

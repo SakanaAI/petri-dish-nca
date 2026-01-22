@@ -13,13 +13,22 @@ import torch
 
 from config import Config
 from model import CASunGroup
-from viz import capture_snapshot, generate_nca_colors
+from viz import (
+    build_plotly_slice_stack_animation,
+    build_plotly_slice_stack,
+    capture_snapshot,
+    create_territory_volume,
+    generate_nca_colors,
+    plot_slice_stack_matplotlib,
+)
 from world import World
 
 
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description="Visualize trained adversarial NCAs")
+    parser = argparse.ArgumentParser(
+        description="Visualize trained adversarial NCAs (2D/3D, optional Plotly)"
+    )
     parser.add_argument(
         "--model-path", required=True,
         help="Path to trained model directory (containing config.json, model.pt, etc.)"
@@ -36,16 +45,75 @@ def parse_args() -> argparse.Namespace:
         "--device", choices=["cpu", "cuda", "mps"], default="cpu",
         help="Device to use for inference"
     )
+    parser.add_argument(
+        "--grid-size",
+        type=int,
+        nargs="+",
+        help="Override grid size as D H W (or H W for 2D)",
+    )
+    parser.add_argument(
+        "--slice-axis", choices=["depth", "height", "width"],
+        help="Axis to slice for 3D visualization (viz-only)"
+    )
+    parser.add_argument(
+        "--slice-stride", type=int,
+        help="Stride between slices for 3D visualization (viz-only)"
+    )
+    parser.add_argument(
+        "--slice-spacing", type=float,
+        help="Spacing between slices (viz-only)"
+    )
+    parser.add_argument(
+        "--slice-alpha", type=float,
+        help="Slice opacity (viz-only)"
+    )
+    parser.add_argument(
+        "--max-slices", type=int,
+        help="Maximum number of slices to draw (viz-only)"
+    )
+    parser.add_argument(
+        "--plotly", action="store_true",
+        help="Show a final interactive Plotly view with playback (mouse controls)"
+    )
+    parser.add_argument(
+        "--plotly-speed",
+        type=float,
+        default=0.5,
+        help="Plotly playback speed multiplier (1.0 = default speed)",
+    )
+    parser.add_argument(
+        "--plotly-loop",
+        action="store_true",
+        default=True,
+        help="Loop plotly playback",
+    )
+    parser.add_argument(
+        "--no-plotly-loop",
+        action="store_false",
+        dest="plotly_loop",
+        help="Disable plotly playback looping",
+    )
+    parser.add_argument(
+        "--no-plotly", action="store_true",
+        help="Disable final Plotly view even for 3D grids"
+    )
 
     return parser.parse_args()
 
 
-def load_trained_model(model_path: str, device: str) -> tuple[Config, CASunGroup, World]:
+def load_trained_model(
+    model_path: str,
+    device: str,
+    grid_size: tuple[int, int] | tuple[int, int, int] | None = None,
+) -> tuple[Config, CASunGroup, World]:
     """Load trained model from directory."""
     # Load config
     config_path = os.path.join(model_path, "config.json")
     config = Config.from_file(config_path)
     config.device = device
+    if grid_size is not None:
+        config.grid_size = grid_size
+        config.__post_init__()
 
     # Create models
     group = CASunGroup(config)
@@ -57,7 +125,21 @@ def load_trained_model(model_path: str, device: str) -> tuple[Config, CASunGroup
     return config, group, world
 
 
-def run_visualization(config: Config, group: CASunGroup, world: World, steps: int, update_every: int) -> None:
+def run_visualization(
+    config: Config,
+    group: CASunGroup,
+    world: World,
+    steps: int,
+    update_every: int,
+    slice_axis: str,
+    slice_stride: int,
+    slice_spacing: float,
+    slice_alpha: float,
+    max_slices: int | None,
+    show_plotly: bool,
+    plotly_speed: float,
+    plotly_loop: bool,
+) -> None:
     """Run live visualization of trained NCA behavior."""
     print(f"Starting visualization: {config.n_ncas} NCAs, {config.grid_size} grid")
     print(f"Running for {steps} steps, updating every {update_every} steps")
@@ -65,29 +147,56 @@ def run_visualization(config: Config, group: CASunGroup, world: World, steps: in
     nca_colors = generate_nca_colors(config.n_ncas)
 
     plt.ion()
-    fig, ax = plt.subplots(figsize=(10, 10))
+    use_3d_viz = config.grid_size[0] > 1
+    if use_3d_viz:
+        fig, ax = plt.subplots(figsize=(10, 10), subplot_kw={"projection": "3d"})
+    else:
+        fig, ax = plt.subplots(figsize=(10, 10))
     im = None
 
     grid = world.get_seed()
+    plotly_grids: list[torch.Tensor] = []
+    if show_plotly and use_3d_viz:
+        plotly_grids.append(grid[0].detach().cpu())
 
     try:
         for step in range(steps):
             stats, grid, grids = world.step(group, grid)
 
             if step % update_every == 0:
-                snapshot = capture_snapshot(grid, nca_colors)
-
-                if im is None:
-                    im = ax.imshow(snapshot.permute(1, 2, 0))
+                if use_3d_viz:
+                    volume = create_territory_volume(grid[0], nca_colors)
+                    plot_slice_stack_matplotlib(
+                        ax,
+                        volume,
+                        axis=slice_axis,
+                        stride=slice_stride,
+                        spacing=slice_spacing,
+                        max_slices=max_slices,
+                        alpha=slice_alpha,
+                    )
                     ax.set_title(f"Trained NCA Behavior - Step: {step}")
-                    ax.axis("off")
-                    plt.show()
                 else:
-                    im.set_data(snapshot.permute(1, 2, 0))
-                    ax.set_title(f"Trained NCA Behavior - Step: {step}")
+                    snapshot = capture_snapshot(
+                        grid,
+                        nca_colors,
+                        slice_stride=slice_stride,
+                        max_slices=max_slices,
+                    )
+                    if im is None:
+                        im = ax.imshow(snapshot.permute(1, 2, 0))
+                        ax.set_title(f"Trained NCA Behavior - Step: {step}")
+                        ax.axis("off")
+                        plt.show()
+                    else:
+                        im.set_data(snapshot.permute(1, 2, 0))
+                        ax.set_title(f"Trained NCA Behavior - Step: {step}")
 
                 plt.draw()
                 plt.pause(0.01)
+
+                if show_plotly and use_3d_viz:
+                    plotly_grids.append(grid[0].detach().cpu())
 
                 growth_stats = [f"{g:.2f}" for g in stats["growth"]]
                 growth_str = ", ".join(growth_stats)
@@ -101,6 +210,21 @@ def run_visualization(config: Config, group: CASunGroup, world: World, steps: in
     plt.close()
     print("Visualization completed!")
 
+    if show_plotly and use_3d_viz:
+        frame_duration_ms = max(10, int(160 / max(0.05, plotly_speed)))
+        fig = build_plotly_slice_stack_animation(
+            plotly_grids,
+            nca_colors,
+            axis=slice_axis,
+            stride=slice_stride,
+            spacing=slice_spacing,
+            max_slices=max_slices,
+            alpha=slice_alpha,
+            frame_duration_ms=frame_duration_ms,
+            loop=plotly_loop,
+        )
+        fig.show()
+
 
 def main() -> None:
     """Main entry point."""
@@ -111,12 +235,48 @@ def main() -> None:
         sys.exit(1)
 
     try:
-        config, group, world = load_trained_model(args.model_path, args.device)
+        grid_size = None
+        if args.grid_size:
+            if len(args.grid_size) == 2:
+                grid_size = (args.grid_size[0], args.grid_size[1])
+            elif len(args.grid_size) == 3:
+                grid_size = (
+                    args.grid_size[0],
+                    args.grid_size[1],
+                    args.grid_size[2],
+                )
+            else:
+                raise ValueError("[config] --grid-size expects 2 or 3 integers")
+
+        config, group, world = load_trained_model(
+            args.model_path, args.device, grid_size
+        )
     except Exception as e:
         print(f"Error loading model: {e}")
         sys.exit(1)
 
-    run_visualization(config, group, world, args.steps, args.update_every)
+    slice_axis = args.slice_axis or config.viz_slice_axis
+    slice_stride = args.slice_stride or config.viz_slice_stride
+    slice_spacing = args.slice_spacing or config.viz_slice_spacing
+    slice_alpha = args.slice_alpha or config.viz_slice_alpha
+    max_slices = args.max_slices or config.viz_max_slices
+    use_plotly = args.plotly or (config.grid_size[0] > 1 and not args.no_plotly)
+
+    run_visualization(
+        config,
+        group,
+        world,
+        args.steps,
+        args.update_every,
+        slice_axis,
+        slice_stride,
+        slice_spacing,
+        slice_alpha,
+        max_slices,
+        use_plotly,
+        args.plotly_speed,
+        args.plotly_loop,
+    )
 
 
 if __name__ == "__main__":
